@@ -1,0 +1,8 @@
+﻿Designator,Footprint,Quantity,Value,LCSC Part #
+A1,RaspberryPi_Pico_Common_THT,1,RaspberryPi_Pico_W,
+BT1,PinHeader_1x02_P2.54mm_Vertical,1,Battery_Cell,
+DS1,Display,1,~,
+LS1,PinHeader_1x02_P2.54mm_Vertical,1,Speaker,
+SW1,SW-TH_4P-L4.5-W4.5-P3.00-LS4.8,1,SW_Push,C2888493
+"SW2, SW3",SW_SPST_Omron_B3F-315x_Angled,2,SW_Push,
+U1,DAC,1,~,

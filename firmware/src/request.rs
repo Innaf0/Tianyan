@@ -5,7 +5,6 @@ use core::str::from_utf8;
 
 use cyw43::{aligned_bytes, JoinOptions};
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
-use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::dns::DnsSocket;
 use embassy_net::tcp::client::{TcpClient, TcpClientState};
@@ -16,6 +15,7 @@ use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio::Pio;
 use embassy_rp::Peri;
+use log::{error, info, warn};
 
 use heapless::{String, Vec};
 use reqwless::client::HttpClient;
@@ -23,7 +23,6 @@ use reqwless::request::{Method, RequestBuilder};
 use serde::Deserialize;
 use serde_json_core::from_slice;
 use static_cell::StaticCell;
-use {defmt_rtt as _, panic_probe as _};
 
 use crate::irqs::Irqs;
 
@@ -55,7 +54,6 @@ pub struct NetworkContext {
 }
 
 /// Owned match summary (copied out of the JSON response).
-#[derive(defmt::Format)]
 pub struct MatchInfo {
     pub map: String<32>,
     pub mode: String<32>,
@@ -69,7 +67,6 @@ pub struct MatchInfo {
 }
 
 /// Per-player stats for one match.
-#[derive(defmt::Format)]
 pub struct PlayerInfo {
     pub name: String<32>,
     pub tag: String<8>,
@@ -197,7 +194,7 @@ pub async fn init_network(
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw, nvram).await;
-    spawner.spawn(unwrap!(cyw43_task(runner)));
+    spawner.spawn(cyw43_task(runner).unwrap());
 
     control.init(clm).await;
     control
@@ -215,7 +212,7 @@ pub async fn init_network(
         seed,
     );
 
-    spawner.spawn(unwrap!(net_task(runner)));
+    spawner.spawn(net_task(runner).unwrap());
 
     while let Err(err) = control
         .join(wifi_ssid, JoinOptions::new(wifi_password.as_bytes()))
@@ -316,7 +313,7 @@ pub async fn fetch_match(ctx: &NetworkContext) -> Option<MatchInfo> {
             output.data.first().map(|m| copy_match(m))
         }
         Err(e) => {
-            error!("Failed to parse JSON: {}", Debug2Format(&e));
+            error!("Failed to parse JSON: {:?}", e);
             let preview = if body.len() > 200 { &body[..200] } else { body };
             info!("Response preview: {:?}", preview);
             None

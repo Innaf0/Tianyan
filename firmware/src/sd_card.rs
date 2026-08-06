@@ -1,7 +1,7 @@
 //! SD card initialization, config file reading, and file access.
 //!
 //! Reads a JSON config file `CONFIG.TXT` from the root of a FAT-formatted SD card
-//! and provides access to other files (e.g. WAV audio).
+//! and provides access to other files.
 //! Falls back to hardcoded defaults if the card or config file is missing.
 //!
 //! All hardware types are generic — the caller decides which SPI bus and which
@@ -9,7 +9,6 @@
 
 use core::str;
 
-use defmt::*;
 use embassy_embedded_hal::SetConfig;
 use embassy_rp::gpio::{Level, Output, Pin};
 use embassy_rp::spi::{Blocking, ClkPin, Instance as SpiInstance, MisoPin, MosiPin, Spi};
@@ -18,6 +17,7 @@ use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
 use embedded_sdmmc::sdcard::{DummyCsPin, SdCard};
 use embedded_sdmmc::VolumeManager;
 use heapless::String;
+use log::{info, warn};
 use serde::Deserialize;
 use serde_json_core::from_slice;
 
@@ -141,7 +141,7 @@ impl<SPI: SpiInstance + 'static> SdCardHandle<SPI> {
         let mut volume0 = match self.volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) {
             Ok(v) => v,
             Err(e) => {
-                warn!("Failed to open volume: {:?}", Debug2Format(&e));
+                warn!("Failed to open volume: {:?}", e);
                 return Config::default_config();
             }
         };
@@ -149,7 +149,7 @@ impl<SPI: SpiInstance + 'static> SdCardHandle<SPI> {
         let mut root_dir = match volume0.open_root_dir() {
             Ok(d) => d,
             Err(e) => {
-                warn!("Failed to open root dir: {:?}", Debug2Format(&e));
+                warn!("Failed to open root dir: {:?}", e);
                 return Config::default_config();
             }
         };
@@ -158,7 +158,7 @@ impl<SPI: SpiInstance + 'static> SdCardHandle<SPI> {
         {
             Ok(f) => f,
             Err(e) => {
-                warn!("Config file not found: {:?}", Debug2Format(&e));
+                warn!("Config file not found: {:?}", e);
                 return Config::default_config();
             }
         };
@@ -167,7 +167,7 @@ impl<SPI: SpiInstance + 'static> SdCardHandle<SPI> {
         let n = match file.read(&mut buf) {
             Ok(n) => n,
             Err(e) => {
-                warn!("Failed to read config: {:?}", Debug2Format(&e));
+                warn!("Failed to read config: {:?}", e);
                 return Config::default_config();
             }
         };
@@ -193,16 +193,10 @@ impl<SPI: SpiInstance + 'static> SdCardHandle<SPI> {
                 }
             }
             Err(e) => {
-                warn!("Failed to parse config JSON: {:?}", Debug2Format(&e));
+                warn!("Failed to parse config JSON: {:?}", e);
                 Config::default_config()
             }
         }
-    }
-
-    /// Return a mutable reference to the underlying volume manager so
-    /// external code can open files directly.
-    pub fn volume_mgr(&mut self) -> &mut SdVolumeManager<SPI> {
-        &mut self.volume_mgr
     }
 }
 

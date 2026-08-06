@@ -3998,7 +3998,6 @@
 		)
 		(pin "9"
 			(uuid "3b35d646-671c-45ef-9100-2243035fc41e")
-			(alternate "SPI0_SCK")
 		)
 		(pin "8"
 			(uuid "84abc8f7-c3f4-43ac-a0e4-00136496b162")
@@ -4077,7 +4076,6 @@
 		)
 		(pin "10"
 			(uuid "cdc8a7fc-d277-4f32-998a-f1a698a02f5c")
-			(alternate "SPI0_TX")
 		)
 		(pin "12"
 			(uuid "d7ea5069-6cfa-47aa-be95-5a387b220797")

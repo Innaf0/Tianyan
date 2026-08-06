@@ -1,0 +1,8 @@
+{
+  "wifi_ssid": "YOUR_WIFI_NAME",
+  "wifi_password": "YOUR_WIFI_PASSWORD",
+  "api_key": "YOUR_HENRIKDEV_API_KEY",
+  "player_region": "eu",
+  "player_name": "PlayerName",
+  "player_tag": "TAG"
+}
