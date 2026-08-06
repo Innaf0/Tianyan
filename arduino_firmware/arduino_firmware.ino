@@ -2,6 +2,9 @@
 #include <Adafruit_ILI9341.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#ifndef PNG_MAX_BUFFERED_PIXELS
+#define PNG_MAX_BUFFERED_PIXELS ((4096 * 4 + 1) * 2)
+#endif
 #include <PNGdec.h>
 #include <SD.h>
 #include <SPI.h>
@@ -37,8 +40,7 @@ constexpr uint8_t MATCH_HISTORY_SIZE = 10;
 constexpr uint8_t DISPLAY_ROTATION = 1;  // Portrait in the device's mounted orientation.
 constexpr int16_t LAYOUT_X = 3;
 constexpr int16_t LAYOUT_RIGHT_PAD = 3;
-constexpr char CARD_IMAGE_PATH[] = "/CARD.PNG";
-constexpr char AGENT_IMAGE_PATH[] = "/AGENT.PNG";
+constexpr uint32_t ARTWORK_STREAM_TIMEOUT_MS = 15000;
 
 Adafruit_ILI9341 tft(&SPI1, TFT_DC, TFT_CS, TFT_RST);
 PNG png;
@@ -78,9 +80,11 @@ int16_t pngDestinationY = 0;
 int16_t pngDrawWidth = 0;
 int16_t pngDrawHeight = 0;
 int16_t pngLastOutputY = -1;
-File artworkFile;
-String cachedCardUrl;
-String cachedAgentUrl;
+WiFiClientSecure artworkClient;
+HTTPClient artworkHttp;
+String artworkUrl;
+int32_t artworkSize = 0;
+int32_t artworkStreamPos = 0;
 
 struct ButtonState {
   uint8_t pin;
@@ -119,17 +123,17 @@ bool initSdCard() {
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
 
-  for (uint8_t attempt = 1; attempt <= 10; ++attempt) {
+  for (uint8_t attempt = 1; attempt <= 3; ++attempt) {
     if (SD.begin(SD_CS, SD_SCK_MHZ(1), SPI)) {
       sdReady = true;
       Serial.println("SD card mounted");
       return true;
     }
     SD.end(false);
-    delay(250);
+    delay(100);
   }
 
-  Serial.println("SD card mount failed; check FAT32 format and card seating");
+  Serial.println("SD card not found; using built-in configuration");
   return false;
 }
 
@@ -267,6 +271,23 @@ int drawPngLine(PNGDRAW *line) {
 
   const int16_t outputY = static_cast<int32_t>(line->y) * pngDrawHeight /
                           pngImageHeight;
+  {
+    const int32_t probe = line->y;
+    if (probe < 4 || (probe % 128) == 0 || probe >= pngImageHeight - 2) {
+      Serial.print("PNG row y=");
+      Serial.print(probe);
+      Serial.print(" ow=");
+      Serial.print(line->iWidth);
+      Serial.print(" px0=");
+      Serial.print((int)line->pPixels[0], HEX);
+      Serial.print(" px1=");
+      Serial.print((int)line->pPixels[1], HEX);
+      Serial.print(" px2=");
+      Serial.print((int)line->pPixels[2], HEX);
+      Serial.print(" type=");
+      Serial.println((int)line->iPixelType, DEC);
+    }
+  }
   if (outputY == pngLastOutputY || outputY >= pngDrawHeight) {
     return 1;
   }
@@ -280,100 +301,169 @@ int drawPngLine(PNGDRAW *line) {
     pngScaledLineBuffer[x] = (color & 0x07e0) | ((color & 0xf800) >> 11) |
                              ((color & 0x001f) << 11);
   }
+  if (outputY < 3 || outputY % 40 == 0) {
+    Serial.print("SCALED out=");
+    Serial.print(outputY);
+    Serial.print(" src=");
+    Serial.print((int)line->y);
+    Serial.print(" px:");
+    for (int16_t x = 0; x < pngDrawWidth; x += (pngDrawWidth / 10)) {
+      Serial.print(' ');
+      Serial.print(pngScaledLineBuffer[x], HEX);
+    }
+    Serial.println();
+  }
 
   tft.writePixels(pngScaledLineBuffer, pngDrawWidth, true);
   return 1;
 }
 
-void *openArtwork(const char *filename, int32_t *size) {
-  artworkFile = SD.open(filename, FILE_READ);
-  if (!artworkFile) {
-    *size = 0;
-    return nullptr;
-  }
-  *size = artworkFile.size();
-  return &artworkFile;
-}
-
-void closeArtwork(void *handle) {
-  if (artworkFile) {
-    artworkFile.close();
-  }
-}
-
-int32_t readArtwork(PNGFILE *file, uint8_t *buffer, int32_t length) {
-  return artworkFile ? artworkFile.read(buffer, length) : 0;
-}
-
-int32_t seekArtwork(PNGFILE *file, int32_t position) {
-  return artworkFile ? artworkFile.seek(position) : 0;
-}
-
-bool downloadArtwork(const char *url, const char *path, String &cachedUrl) {
-  if (!initSdCard()) {
-    Serial.println("Artwork requires a mounted FAT32 SD card");
+bool beginArtworkRange(int32_t start) {
+  artworkHttp.end();
+  artworkClient.stop();
+  artworkClient.setInsecure();
+  artworkHttp.setTimeout(15000);
+  artworkHttp.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (!artworkHttp.begin(artworkClient, artworkUrl.c_str())) {
     return false;
   }
-  if (cachedUrl == url && SD.exists(path)) {
-    return true;
+  if (start > 0) {
+    artworkHttp.addHeader("Range", String("bytes=") + start + "-");
+  }
+
+  const int statusCode = artworkHttp.GET();
+  const int32_t responseSize = artworkHttp.getSize();
+  if (statusCode != HTTP_CODE_OK && statusCode != HTTP_CODE_PARTIAL_CONTENT) {
+    Serial.print("Artwork download failed, HTTP/size: ");
+    Serial.print(statusCode);
+    Serial.print('/');
+    Serial.println(responseSize);
+    artworkHttp.end();
+    artworkClient.stop();
+    return false;
+  }
+  if (start == 0) {
+    artworkSize = responseSize;
+  }
+  return true;
+}
+
+void *openArtworkStream(const char *filename, int32_t *size) {
+  *size = artworkSize;
+  return &artworkUrl;
+}
+
+void closeArtworkStream(void *handle) {
+  artworkStreamPos = 0;
+}
+
+int32_t readArtworkStream(PNGFILE *file, uint8_t *buffer, int32_t length) {
+  WiFiClient &stream = artworkHttp.getStream();
+  int32_t received = 0;
+  const uint32_t started = millis();
+  while (received < length && millis() - started < ARTWORK_STREAM_TIMEOUT_MS) {
+    const int n = stream.read(buffer + received, length - received);
+    if (n > 0) {
+      received += n;
+      continue;
+    }
+    if (n == 0 && !stream.connected()) {
+      break;
+    }
+    if (n < 0) {
+      break;
+    }
+    delay(1);
+  }
+  artworkStreamPos += received;
+  return received;
+}
+
+int32_t seekArtworkStream(PNGFILE *file, int32_t position) {
+  if (position < artworkStreamPos) {
+    if (!beginArtworkRange(position)) {
+      return -1;
+    }
+    artworkStreamPos = position;
+    return position;
+  }
+
+  WiFiClient &stream = artworkHttp.getStream();
+  uint8_t junk[64];
+  const uint32_t started = millis();
+  while (artworkStreamPos < position) {
+    const int32_t want = min<int32_t>(position - artworkStreamPos, sizeof(junk));
+    const int n = stream.read(junk, want);
+    if (n > 0) {
+      artworkStreamPos += n;
+      continue;
+    }
+    if (n == 0 && !stream.connected()) {
+      break;
+    }
+    if (n < 0) {
+      break;
+    }
+    if (millis() - started >= ARTWORK_STREAM_TIMEOUT_MS) {
+      break;
+    }
+    delay(1);
+  }
+  return artworkStreamPos == position ? position : -1;
+}
+
+bool drawPngFromUrl(const char *url, int16_t imageTop) {
+  if (url == nullptr || url[0] == '\0') {
+    return false;
   }
   if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
     return false;
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(15000);
-  HTTPClient http;
-  http.setTimeout(15000);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  if (!http.begin(client, url)) {
+  artworkUrl = url;
+  if (!beginArtworkRange(0) || artworkSize <= 0) {
+    Serial.println("Artwork: could not fetch remote PNG header");
     return false;
   }
 
-  const int statusCode = http.GET();
-  const int imageSize = http.getSize();
-  if (statusCode != HTTP_CODE_OK) {
-    Serial.print("Artwork download failed, HTTP/size: ");
-    Serial.print(statusCode);
-    Serial.print('/');
-    Serial.println(imageSize);
-    http.end();
-    return false;
-  }
-
-  SD.remove(path);
-  File output = SD.open(path, FILE_WRITE);
-  if (!output) {
-    Serial.println("Could not create artwork file");
-    http.end();
-    return false;
-  }
-
-  const int bytesWritten = http.writeToStream(&output);
-  output.close();
-  http.end();
-  if (bytesWritten <= 0 || (imageSize > 0 && bytesWritten != imageSize)) {
-    Serial.println("Artwork download was incomplete");
-    SD.remove(path);
-    return false;
-  }
-  cachedUrl = url;
-  return true;
-}
-
-bool drawPngFromUrl(const char *url, int16_t imageTop, const char *path,
-                    String &cachedUrl) {
-  if (url == nullptr || url[0] == '\0' ||
-      !downloadArtwork(url, path, cachedUrl)) {
-    return false;
-  }
-
-  const int result = png.open(path, openArtwork, closeArtwork, readArtwork,
-                              seekArtwork, drawPngLine);
+  artworkStreamPos = 0;
+  const int result = png.open(url, openArtworkStream, closeArtworkStream,
+                              readArtworkStream, seekArtworkStream,
+                              drawPngLine);
   if (result != PNG_SUCCESS) {
     Serial.print("PNG open failed: ");
     Serial.println(result);
+    if (beginArtworkRange(0)) {
+      WiFiClient &stream = artworkHttp.getStream();
+      uint8_t header[29];
+      int32_t got = 0;
+      while (got < 29 && stream.connected()) {
+        const int n = stream.read(header + got, 29 - got);
+        if (n > 0) {
+          got += n;
+        } else if (n < 0) {
+          break;
+        } else {
+          delay(1);
+        }
+      }
+      if (got >= 29) {
+        const uint32_t width = (header[16] << 24) | (header[17] << 16) |
+                               (header[18] << 8) | header[19];
+        const uint32_t height = (header[20] << 24) | (header[21] << 16) |
+                                (header[22] << 8) | header[23];
+        Serial.print("PNG header: ");
+        Serial.print(width);
+        Serial.print('x');
+        Serial.print(height);
+        Serial.print(" bitDepth=");
+        Serial.print(header[24]);
+        Serial.print(" colorType=");
+        Serial.println(header[25]);
+      }
+    }
+    artworkHttp.end();
+    artworkClient.stop();
     return false;
   }
 
@@ -407,6 +497,8 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, const char *path,
     pngLineBuffer = nullptr;
     pngScaledLineBuffer = nullptr;
     png.close();
+    artworkHttp.end();
+    artworkClient.stop();
     return false;
   }
 
@@ -421,11 +513,25 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, const char *path,
   pngLineBuffer = nullptr;
   pngScaledLineBuffer = nullptr;
   png.close();
+  artworkHttp.end();
+  artworkClient.stop();
   if (decodeResult != PNG_SUCCESS) {
     Serial.print("PNG decode failed: ");
     Serial.println(decodeResult);
     return false;
   }
+  Serial.print("PNG decoded: ");
+  Serial.print(pngDrawWidth);
+  Serial.print('x');
+  Serial.print(pngDrawHeight);
+  Serial.print(" from ");
+  Serial.print(pngImageWidth);
+  Serial.print('x');
+  Serial.print(pngImageHeight);
+  Serial.print(" streamPos=");
+  Serial.print(artworkStreamPos);
+  Serial.print('/');
+  Serial.println(artworkSize);
   return true;
 }
 
@@ -439,10 +545,8 @@ void drawArtworkPage(JsonObject match, bool playerCard) {
   const char *title = playerCard ? "PLAYER CARD" : "AGENT";
   const char *url = playerCard ? player["assets"]["card"]["large"].as<const char *>()
                                : player["assets"]["agent"]["small"].as<const char *>();
-  const char *path = playerCard ? CARD_IMAGE_PATH : AGENT_IMAGE_PATH;
-  String &cachedUrl = playerCard ? cachedCardUrl : cachedAgentUrl;
   drawStatus(title, "Loading image...");
-  if (!drawPngFromUrl(url, 42, path, cachedUrl)) {
+  if (!drawPngFromUrl(url, 42)) {
     drawStatus(title, "Image unavailable");
     return;
   }
