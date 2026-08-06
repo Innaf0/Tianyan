@@ -11,6 +11,7 @@ are reported over Serial.
 - Adafruit GFX Library
 - Adafruit ILI9341
 - ArduinoJson 7
+- PNGdec
 
 The core supplies `WiFi`, `WiFiClientSecure`, `HTTPClient`, `SPI`, and `SD`.
 
