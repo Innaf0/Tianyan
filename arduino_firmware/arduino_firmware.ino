@@ -1,10 +1,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <ArduinoJson.h>
+#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSansBold12pt7b.h>
+#include <Fonts/Org_01.h>
 #include <HTTPClient.h>
-#ifndef PNG_MAX_BUFFERED_PIXELS
-#define PNG_MAX_BUFFERED_PIXELS ((4096 * 4 + 1) * 2)
-#endif
 #include <PNGdec.h>
 #include <SD.h>
 #include <SPI.h>
@@ -34,13 +34,15 @@ constexpr uint8_t SD_CS = 21;
 constexpr uint32_t MATCH_RETRY_MS = 30000;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 40;
-constexpr uint32_t TFT_SPI_HZ = 40000000;
+constexpr uint32_t TFT_SPI_HZ = 24000000;
 constexpr uint32_t TOUCH_SPI_HZ = 2000000;
 constexpr uint8_t MATCH_HISTORY_SIZE = 10;
 constexpr uint8_t DISPLAY_ROTATION = 1;  // Portrait in the device's mounted orientation.
+constexpr uint8_t DISPLAY_MADCTL_RGB = 0x20;  // Rotation 1 without BGR color order.
 constexpr int16_t LAYOUT_X = 3;
 constexpr int16_t LAYOUT_RIGHT_PAD = 3;
 constexpr uint32_t ARTWORK_STREAM_TIMEOUT_MS = 15000;
+constexpr int32_t MAX_ARTWORK_BYTES = 192 * 1024;
 
 Adafruit_ILI9341 tft(&SPI1, TFT_DC, TFT_CS, TFT_RST);
 PNG png;
@@ -80,11 +82,6 @@ int16_t pngDestinationY = 0;
 int16_t pngDrawWidth = 0;
 int16_t pngDrawHeight = 0;
 int16_t pngLastOutputY = -1;
-WiFiClientSecure artworkClient;
-HTTPClient artworkHttp;
-String artworkUrl;
-int32_t artworkSize = 0;
-int32_t artworkStreamPos = 0;
 
 struct ButtonState {
   uint8_t pin;
@@ -99,16 +96,19 @@ ButtonState pageButton{BUTTON_PAGE};
 
 void drawStatus(const char *title, const String &detail = "") {
   tft.fillScreen(ILI9341_BLACK);
-  tft.setCursor(LAYOUT_X, 12);
+  tft.setFont(&FreeSansBold12pt7b);
+  tft.setCursor(8, 30);
   tft.setTextColor(ILI9341_WHITE);
-  tft.setTextSize(2);
+  tft.setTextSize(1);
   tft.println(title);
   if (detail.length() > 0) {
-    tft.setCursor(LAYOUT_X, 42);
+    tft.setFont(&FreeSans9pt7b);
+    tft.setCursor(8, 58);
     tft.setTextColor(ILI9341_DARKGREY);
-    tft.setTextSize(1);
     tft.println(detail);
   }
+  tft.setFont(nullptr);
+  tft.setTextSize(1);
 }
 
 bool initSdCard() {
@@ -271,23 +271,6 @@ int drawPngLine(PNGDRAW *line) {
 
   const int16_t outputY = static_cast<int32_t>(line->y) * pngDrawHeight /
                           pngImageHeight;
-  {
-    const int32_t probe = line->y;
-    if (probe < 4 || (probe % 128) == 0 || probe >= pngImageHeight - 2) {
-      Serial.print("PNG row y=");
-      Serial.print(probe);
-      Serial.print(" ow=");
-      Serial.print(line->iWidth);
-      Serial.print(" px0=");
-      Serial.print((int)line->pPixels[0], HEX);
-      Serial.print(" px1=");
-      Serial.print((int)line->pPixels[1], HEX);
-      Serial.print(" px2=");
-      Serial.print((int)line->pPixels[2], HEX);
-      Serial.print(" type=");
-      Serial.println((int)line->iPixelType, DEC);
-    }
-  }
   if (outputY == pngLastOutputY || outputY >= pngDrawHeight) {
     return 1;
   }
@@ -297,119 +280,13 @@ int drawPngLine(PNGDRAW *line) {
   for (int16_t x = 0; x < pngDrawWidth; ++x) {
     const int16_t sourceX = static_cast<int32_t>(x) * pngImageWidth /
                             pngDrawWidth;
-    const uint16_t color = pngLineBuffer[sourceX];
-    pngScaledLineBuffer[x] = (color & 0x07e0) | ((color & 0xf800) >> 11) |
-                             ((color & 0x001f) << 11);
-  }
-  if (outputY < 3 || outputY % 40 == 0) {
-    Serial.print("SCALED out=");
-    Serial.print(outputY);
-    Serial.print(" src=");
-    Serial.print((int)line->y);
-    Serial.print(" px:");
-    for (int16_t x = 0; x < pngDrawWidth; x += (pngDrawWidth / 10)) {
-      Serial.print(' ');
-      Serial.print(pngScaledLineBuffer[x], HEX);
-    }
-    Serial.println();
+    pngScaledLineBuffer[x] = pngLineBuffer[sourceX];
   }
 
+  tft.setAddrWindow(pngDestinationX, pngDestinationY + outputY,
+                    pngDrawWidth, 1);
   tft.writePixels(pngScaledLineBuffer, pngDrawWidth, true);
   return 1;
-}
-
-bool beginArtworkRange(int32_t start) {
-  artworkHttp.end();
-  artworkClient.stop();
-  artworkClient.setInsecure();
-  artworkHttp.setTimeout(15000);
-  artworkHttp.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  if (!artworkHttp.begin(artworkClient, artworkUrl.c_str())) {
-    return false;
-  }
-  if (start > 0) {
-    artworkHttp.addHeader("Range", String("bytes=") + start + "-");
-  }
-
-  const int statusCode = artworkHttp.GET();
-  const int32_t responseSize = artworkHttp.getSize();
-  if (statusCode != HTTP_CODE_OK && statusCode != HTTP_CODE_PARTIAL_CONTENT) {
-    Serial.print("Artwork download failed, HTTP/size: ");
-    Serial.print(statusCode);
-    Serial.print('/');
-    Serial.println(responseSize);
-    artworkHttp.end();
-    artworkClient.stop();
-    return false;
-  }
-  if (start == 0) {
-    artworkSize = responseSize;
-  }
-  return true;
-}
-
-void *openArtworkStream(const char *filename, int32_t *size) {
-  *size = artworkSize;
-  return &artworkUrl;
-}
-
-void closeArtworkStream(void *handle) {
-  artworkStreamPos = 0;
-}
-
-int32_t readArtworkStream(PNGFILE *file, uint8_t *buffer, int32_t length) {
-  WiFiClient &stream = artworkHttp.getStream();
-  int32_t received = 0;
-  const uint32_t started = millis();
-  while (received < length && millis() - started < ARTWORK_STREAM_TIMEOUT_MS) {
-    const int n = stream.read(buffer + received, length - received);
-    if (n > 0) {
-      received += n;
-      continue;
-    }
-    if (n == 0 && !stream.connected()) {
-      break;
-    }
-    if (n < 0) {
-      break;
-    }
-    delay(1);
-  }
-  artworkStreamPos += received;
-  return received;
-}
-
-int32_t seekArtworkStream(PNGFILE *file, int32_t position) {
-  if (position < artworkStreamPos) {
-    if (!beginArtworkRange(position)) {
-      return -1;
-    }
-    artworkStreamPos = position;
-    return position;
-  }
-
-  WiFiClient &stream = artworkHttp.getStream();
-  uint8_t junk[64];
-  const uint32_t started = millis();
-  while (artworkStreamPos < position) {
-    const int32_t want = min<int32_t>(position - artworkStreamPos, sizeof(junk));
-    const int n = stream.read(junk, want);
-    if (n > 0) {
-      artworkStreamPos += n;
-      continue;
-    }
-    if (n == 0 && !stream.connected()) {
-      break;
-    }
-    if (n < 0) {
-      break;
-    }
-    if (millis() - started >= ARTWORK_STREAM_TIMEOUT_MS) {
-      break;
-    }
-    delay(1);
-  }
-  return artworkStreamPos == position ? position : -1;
 }
 
 bool drawPngFromUrl(const char *url, int16_t imageTop) {
@@ -420,50 +297,65 @@ bool drawPngFromUrl(const char *url, int16_t imageTop) {
     return false;
   }
 
-  artworkUrl = url;
-  if (!beginArtworkRange(0) || artworkSize <= 0) {
-    Serial.println("Artwork: could not fetch remote PNG header");
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(ARTWORK_STREAM_TIMEOUT_MS);
+  HTTPClient http;
+  http.setTimeout(ARTWORK_STREAM_TIMEOUT_MS);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (!http.begin(client, url)) {
     return false;
   }
 
-  artworkStreamPos = 0;
-  const int result = png.open(url, openArtworkStream, closeArtworkStream,
-                              readArtworkStream, seekArtworkStream,
-                              drawPngLine);
+  const int statusCode = http.GET();
+  const int32_t artworkSize = http.getSize();
+  if (statusCode != HTTP_CODE_OK || artworkSize <= 0 ||
+      artworkSize > MAX_ARTWORK_BYTES) {
+    Serial.print("Artwork download failed, HTTP/size: ");
+    Serial.print(statusCode);
+    Serial.print('/');
+    Serial.println(artworkSize);
+    http.end();
+    return false;
+  }
+
+  uint8_t *artworkData = new (std::nothrow) uint8_t[artworkSize];
+  if (artworkData == nullptr) {
+    Serial.println("Artwork download failed: out of memory");
+    http.end();
+    return false;
+  }
+
+  WiFiClient &stream = http.getStream();
+  int32_t received = 0;
+  uint32_t lastProgress = millis();
+  while (received < artworkSize &&
+         millis() - lastProgress < ARTWORK_STREAM_TIMEOUT_MS) {
+    const int n = stream.read(artworkData + received, artworkSize - received);
+    if (n > 0) {
+      received += n;
+      lastProgress = millis();
+    } else if (!stream.connected()) {
+      break;
+    } else {
+      delay(1);
+    }
+  }
+  http.end();
+  if (received != artworkSize) {
+    Serial.print("Artwork download incomplete: ");
+    Serial.print(received);
+    Serial.print('/');
+    Serial.println(artworkSize);
+    delete[] artworkData;
+    return false;
+  }
+
+  const int result = png.openRAM(artworkData, artworkSize, drawPngLine);
   if (result != PNG_SUCCESS) {
     Serial.print("PNG open failed: ");
     Serial.println(result);
-    if (beginArtworkRange(0)) {
-      WiFiClient &stream = artworkHttp.getStream();
-      uint8_t header[29];
-      int32_t got = 0;
-      while (got < 29 && stream.connected()) {
-        const int n = stream.read(header + got, 29 - got);
-        if (n > 0) {
-          got += n;
-        } else if (n < 0) {
-          break;
-        } else {
-          delay(1);
-        }
-      }
-      if (got >= 29) {
-        const uint32_t width = (header[16] << 24) | (header[17] << 16) |
-                               (header[18] << 8) | header[19];
-        const uint32_t height = (header[20] << 24) | (header[21] << 16) |
-                                (header[22] << 8) | header[23];
-        Serial.print("PNG header: ");
-        Serial.print(width);
-        Serial.print('x');
-        Serial.print(height);
-        Serial.print(" bitDepth=");
-        Serial.print(header[24]);
-        Serial.print(" colorType=");
-        Serial.println(header[25]);
-      }
-    }
-    artworkHttp.end();
-    artworkClient.stop();
+    delete[] artworkData;
     return false;
   }
 
@@ -497,15 +389,12 @@ bool drawPngFromUrl(const char *url, int16_t imageTop) {
     pngLineBuffer = nullptr;
     pngScaledLineBuffer = nullptr;
     png.close();
-    artworkHttp.end();
-    artworkClient.stop();
+    delete[] artworkData;
     return false;
   }
 
   pngLastOutputY = -1;
   tft.startWrite();
-  tft.setAddrWindow(pngDestinationX, pngDestinationY, pngDrawWidth,
-                    pngDrawHeight);
   const int decodeResult = png.decode(nullptr, 0);
   tft.endWrite();
   delete[] pngLineBuffer;
@@ -513,8 +402,7 @@ bool drawPngFromUrl(const char *url, int16_t imageTop) {
   pngLineBuffer = nullptr;
   pngScaledLineBuffer = nullptr;
   png.close();
-  artworkHttp.end();
-  artworkClient.stop();
+  delete[] artworkData;
   if (decodeResult != PNG_SUCCESS) {
     Serial.print("PNG decode failed: ");
     Serial.println(decodeResult);
@@ -528,9 +416,7 @@ bool drawPngFromUrl(const char *url, int16_t imageTop) {
   Serial.print(pngImageWidth);
   Serial.print('x');
   Serial.print(pngImageHeight);
-  Serial.print(" streamPos=");
-  Serial.print(artworkStreamPos);
-  Serial.print('/');
+  Serial.print(" bytes=");
   Serial.println(artworkSize);
   return true;
 }
@@ -543,10 +429,18 @@ void drawArtworkPage(JsonObject match, bool playerCard) {
   }
 
   const char *title = playerCard ? "PLAYER CARD" : "AGENT";
-  const char *url = playerCard ? player["assets"]["card"]["large"].as<const char *>()
-                               : player["assets"]["agent"]["small"].as<const char *>();
+  const char *sourceUrl = playerCard
+                              ? player["assets"]["card"]["large"] | ""
+                              : player["assets"]["agent"]["small"] | "";
+  const int16_t imageSize = min(tft.width(), tft.height() - 42 - 4);
+  String resizedUrl = "https://wsrv.nl/?url=" + urlEncode(sourceUrl) +
+                      "&h=" + String(imageSize);
+  if (!playerCard) {
+    resizedUrl += "&w=" + String(imageSize) + "&fit=contain";
+  }
+  resizedUrl += "&bg=black&output=png";
   drawStatus(title, "Loading image...");
-  if (!drawPngFromUrl(url, 42)) {
+  if (!drawPngFromUrl(resizedUrl.c_str(), 42)) {
     drawStatus(title, "Image unavailable");
     return;
   }
@@ -573,13 +467,16 @@ void drawMatch(JsonObject match) {
   JsonObject teams = match["teams"];
   JsonArray players = match["players"]["all_players"];
 
-  const uint16_t red = tft.color565(48, 113, 247);
-  const uint16_t blue = tft.color565(214, 45, 61);
+  const uint16_t red = tft.color565(214, 45, 61);
+  const uint16_t blue = tft.color565(48, 113, 247);
   const uint16_t muted = tft.color565(145, 145, 145);
   const uint16_t divider = tft.color565(70, 70, 70);
-  const int16_t contentWidth = tft.width() - LAYOUT_X - LAYOUT_RIGHT_PAD;
-  const int16_t playerNameX = LAYOUT_X + 33;
-  const int16_t playerStatsX = 261;
+  const int16_t matchWidth = min(tft.width(), tft.height());
+  const int16_t contentWidth = matchWidth - LAYOUT_X - LAYOUT_RIGHT_PAD;
+  const int16_t playerNameX = 12;
+  const int16_t playerAgentX = 82;
+  const int16_t playerRankX = 140;
+  const int16_t playerStatsRight = matchWidth - 1;
   const int16_t playerRowHeight = 14;
 
   tft.fillScreen(ILI9341_BLACK);
@@ -621,6 +518,24 @@ void drawMatch(JsonObject match) {
   tft.drawFastHLine(LAYOUT_X, y, contentWidth, divider);
   y += 5;
 
+  tft.setFont(&Org_01);
+  tft.setTextSize(1);
+  tft.setTextColor(muted);
+  tft.setCursor(playerNameX, y + 4);
+  tft.print("PLAYER");
+  tft.setCursor(playerAgentX, y + 4);
+  tft.print("AGENT");
+  tft.setCursor(playerRankX, y + 4);
+  tft.print("RANK");
+  int16_t textX;
+  int16_t textY;
+  uint16_t textWidth;
+  uint16_t textHeight;
+  tft.getTextBounds("K/D", 0, 0, &textX, &textY, &textWidth, &textHeight);
+  tft.setCursor(playerStatsRight - textWidth - textX, y + 4);
+  tft.print("K/D");
+  y += 9;
+
   for (JsonObject player : players) {
     if (y > tft.height() - playerRowHeight) {
       break;
@@ -632,16 +547,23 @@ void drawMatch(JsonObject match) {
     const uint16_t teamColor = isRed ? red : (isBlue ? blue : muted);
     tft.drawFastVLine(LAYOUT_X, y, 9, teamColor);
     tft.setTextSize(1);
-    tft.setCursor(playerNameX, y);
+    tft.setCursor(playerNameX, y + 4);
     tft.setTextColor(ILI9341_WHITE);
-    printLimited(player["name"].as<const char *>(), 15);
-    tft.setCursor(playerStatsX, y);
+    printLimited(player["name"].as<const char *>(), 11);
+    tft.setCursor(playerAgentX, y + 4);
+    tft.setTextColor(muted);
+    printLimited(player["character"].as<const char *>(), 9);
+    tft.setCursor(playerRankX, y + 4);
+    printLimited(player["currenttier_patched"].as<const char *>(), 11);
+    String stats = String(player["stats"]["kills"].as<unsigned int>()) + "/" +
+                   String(player["stats"]["deaths"].as<unsigned int>());
+    tft.getTextBounds(stats, 0, 0, &textX, &textY, &textWidth, &textHeight);
+    tft.setCursor(playerStatsRight - textWidth - textX, y + 4);
     tft.setTextColor(teamColor);
-    tft.print(player["stats"]["kills"].as<unsigned int>());
-    tft.print('/');
-    tft.println(player["stats"]["deaths"].as<unsigned int>());
+    tft.print(stats);
     y += playerRowHeight;
   }
+  tft.setFont(nullptr);
 }
 
 void drawCurrentMatch() {
@@ -876,6 +798,7 @@ void setup() {
     tft.fillScreen(ILI9341_BLACK);
   }
   tft.setRotation(DISPLAY_ROTATION);
+  tft.sendCommand(ILI9341_MADCTL, &DISPLAY_MADCTL_RGB, 1);
   drawStatus("Valorant Flex", "Starting...");
 
   loadConfig();
