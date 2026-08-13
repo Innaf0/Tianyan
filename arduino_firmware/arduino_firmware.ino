@@ -48,8 +48,8 @@ Adafruit_ILI9341 tft(&SPI1, TFT_DC, TFT_CS, TFT_RST);
 PNG png;
 
 struct Config {
-  String wifiSsid = "VIVACOM1";
-  String wifiPassword = "AMIRA2020";
+  String wifiSsid = "Loading...";
+  String wifiPassword = "vivawed6";
   String apiKey = "HDEV-4456951f-37f3-4f81-9f30-86d690763655";
   String playerRegion = "eu";
   String playerName = "Innaf";
@@ -304,23 +304,27 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, int16_t viewportWidth,
   HTTPClient http;
   http.setTimeout(ARTWORK_STREAM_TIMEOUT_MS);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.useHTTP10(true);
   if (!http.begin(client, url)) {
+    Serial.println("Artwork download failed: could not start HTTPS request");
     return false;
   }
+  http.addHeader("Accept-Encoding", "identity");
 
   const int statusCode = http.GET();
-  const int32_t artworkSize = http.getSize();
-  if (statusCode != HTTP_CODE_OK || artworkSize <= 0 ||
-      artworkSize > MAX_ARTWORK_BYTES) {
+  const int32_t responseSize = http.getSize();
+  if (statusCode != HTTP_CODE_OK || responseSize > MAX_ARTWORK_BYTES) {
     Serial.print("Artwork download failed, HTTP/size: ");
     Serial.print(statusCode);
     Serial.print('/');
-    Serial.println(artworkSize);
+    Serial.println(responseSize);
     http.end();
     return false;
   }
 
-  uint8_t *artworkData = new (std::nothrow) uint8_t[artworkSize];
+  const int32_t artworkCapacity = responseSize > 0 ? responseSize
+                                                   : MAX_ARTWORK_BYTES;
+  uint8_t *artworkData = new (std::nothrow) uint8_t[artworkCapacity];
   if (artworkData == nullptr) {
     Serial.println("Artwork download failed: out of memory");
     http.end();
@@ -330,9 +334,11 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, int16_t viewportWidth,
   WiFiClient &stream = http.getStream();
   int32_t received = 0;
   uint32_t lastProgress = millis();
-  while (received < artworkSize &&
+  while (received < artworkCapacity &&
          millis() - lastProgress < ARTWORK_STREAM_TIMEOUT_MS) {
-    const int n = stream.read(artworkData + received, artworkSize - received);
+    const int32_t remaining = artworkCapacity - received;
+    const int n = stream.read(artworkData + received,
+                              min<int32_t>(remaining, 1024));
     if (n > 0) {
       received += n;
       lastProgress = millis();
@@ -343,14 +349,16 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, int16_t viewportWidth,
     }
   }
   http.end();
-  if (received != artworkSize) {
+  if (received == 0 || (responseSize > 0 && received != responseSize)) {
     Serial.print("Artwork download incomplete: ");
     Serial.print(received);
     Serial.print('/');
-    Serial.println(artworkSize);
+    Serial.println(responseSize);
     delete[] artworkData;
     return false;
   }
+
+  const int32_t artworkSize = received;
 
   const int result = png.openRAM(artworkData, artworkSize, drawPngLine);
   if (result != PNG_SUCCESS) {
@@ -435,16 +443,16 @@ void drawArtworkPage(JsonObject match, bool playerCard) {
   const char *sourceUrl = playerCard
                               ? player["assets"]["card"]["large"] | ""
                               : player["assets"]["agent"]["small"] | "";
-  const int16_t mountedWidth = min(tft.width(), tft.height());
-  const int16_t mountedHeight = max(tft.width(), tft.height());
-  const int16_t viewportWidth = playerCard ? mountedWidth : tft.width();
-  const int16_t viewportHeight = playerCard ? mountedHeight : tft.height();
+  const int16_t viewportWidth = tft.width();
+  const int16_t viewportHeight = tft.height();
   const int16_t imageHeight = playerCard
-                                  ? viewportHeight - 42 - 18
+                                  ? viewportHeight - 42 - 4
                                   : min(viewportWidth, viewportHeight - 42 - 4);
   String resizedUrl = "https://wsrv.nl/?url=" + urlEncode(sourceUrl) +
                        "&h=" + String(imageHeight);
-  if (!playerCard) {
+  if (playerCard) {
+    resizedUrl += "&w=" + String(viewportWidth) + "&fit=cover";
+  } else {
     resizedUrl += "&w=" + String(imageHeight) + "&fit=contain";
   }
   resizedUrl += "&bg=black&output=png";
