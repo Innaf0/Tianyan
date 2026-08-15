@@ -48,8 +48,8 @@ Adafruit_ILI9341 tft(&SPI1, TFT_DC, TFT_CS, TFT_RST);
 PNG png;
 
 struct Config {
-  String wifiSsid = "Loading...";
-  String wifiPassword = "vivawed6";
+  String wifiSsid = "haz1";
+  String wifiPassword = "84915801";
   String apiKey = "HDEV-4456951f-37f3-4f81-9f30-86d690763655";
   String playerRegion = "eu";
   String playerName = "Innaf";
@@ -289,8 +289,7 @@ int drawPngLine(PNGDRAW *line) {
   return 1;
 }
 
-bool drawPngFromUrl(const char *url, int16_t imageTop, int16_t viewportWidth,
-                    int16_t viewportHeight) {
+bool drawPngFromUrl(const char *url, int16_t imageTop) {
   if (url == nullptr || url[0] == '\0') {
     return false;
   }
@@ -304,27 +303,23 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, int16_t viewportWidth,
   HTTPClient http;
   http.setTimeout(ARTWORK_STREAM_TIMEOUT_MS);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.useHTTP10(true);
   if (!http.begin(client, url)) {
-    Serial.println("Artwork download failed: could not start HTTPS request");
     return false;
   }
-  http.addHeader("Accept-Encoding", "identity");
 
   const int statusCode = http.GET();
-  const int32_t responseSize = http.getSize();
-  if (statusCode != HTTP_CODE_OK || responseSize > MAX_ARTWORK_BYTES) {
+  const int32_t artworkSize = http.getSize();
+  if (statusCode != HTTP_CODE_OK || artworkSize <= 0 ||
+      artworkSize > MAX_ARTWORK_BYTES) {
     Serial.print("Artwork download failed, HTTP/size: ");
     Serial.print(statusCode);
     Serial.print('/');
-    Serial.println(responseSize);
+    Serial.println(artworkSize);
     http.end();
     return false;
   }
 
-  const int32_t artworkCapacity = responseSize > 0 ? responseSize
-                                                   : MAX_ARTWORK_BYTES;
-  uint8_t *artworkData = new (std::nothrow) uint8_t[artworkCapacity];
+  uint8_t *artworkData = new (std::nothrow) uint8_t[artworkSize];
   if (artworkData == nullptr) {
     Serial.println("Artwork download failed: out of memory");
     http.end();
@@ -334,11 +329,9 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, int16_t viewportWidth,
   WiFiClient &stream = http.getStream();
   int32_t received = 0;
   uint32_t lastProgress = millis();
-  while (received < artworkCapacity &&
+  while (received < artworkSize &&
          millis() - lastProgress < ARTWORK_STREAM_TIMEOUT_MS) {
-    const int32_t remaining = artworkCapacity - received;
-    const int n = stream.read(artworkData + received,
-                              min<int32_t>(remaining, 1024));
+    const int n = stream.read(artworkData + received, artworkSize - received);
     if (n > 0) {
       received += n;
       lastProgress = millis();
@@ -349,16 +342,14 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, int16_t viewportWidth,
     }
   }
   http.end();
-  if (received == 0 || (responseSize > 0 && received != responseSize)) {
+  if (received != artworkSize) {
     Serial.print("Artwork download incomplete: ");
     Serial.print(received);
     Serial.print('/');
-    Serial.println(responseSize);
+    Serial.println(artworkSize);
     delete[] artworkData;
     return false;
   }
-
-  const int32_t artworkSize = received;
 
   const int result = png.openRAM(artworkData, artworkSize, drawPngLine);
   if (result != PNG_SUCCESS) {
@@ -370,23 +361,21 @@ bool drawPngFromUrl(const char *url, int16_t imageTop, int16_t viewportWidth,
 
   pngImageWidth = png.getWidth();
   pngImageHeight = png.getHeight();
-  const int16_t availableHeight = viewportHeight - imageTop - 4;
-  if (pngImageWidth <= viewportWidth && pngImageHeight <= availableHeight) {
+  const int16_t availableHeight = tft.height() - imageTop - 4;
+  if (pngImageWidth <= tft.width() && pngImageHeight <= availableHeight) {
     pngDrawWidth = pngImageWidth;
     pngDrawHeight = pngImageHeight;
   } else if (static_cast<int32_t>(pngImageWidth) * availableHeight >
-             static_cast<int32_t>(pngImageHeight) * viewportWidth) {
-    pngDrawWidth = viewportWidth;
-    pngDrawHeight = static_cast<int32_t>(pngImageHeight) * viewportWidth /
+             static_cast<int32_t>(pngImageHeight) * tft.width()) {
+    pngDrawWidth = tft.width();
+    pngDrawHeight = static_cast<int32_t>(pngImageHeight) * tft.width() /
                     pngImageWidth;
   } else {
     pngDrawHeight = availableHeight;
     pngDrawWidth = static_cast<int32_t>(pngImageWidth) * availableHeight /
                    pngImageHeight;
   }
-  pngDestinationX = viewportWidth > pngDrawWidth
-                        ? (viewportWidth - pngDrawWidth) / 2
-                        : 0;
+  pngDestinationX = tft.width() > pngDrawWidth ? (tft.width() - pngDrawWidth) / 2 : 0;
   pngDestinationY = imageTop +
                     (availableHeight > pngDrawHeight
                          ? (availableHeight - pngDrawHeight) / 2
@@ -443,21 +432,15 @@ void drawArtworkPage(JsonObject match, bool playerCard) {
   const char *sourceUrl = playerCard
                               ? player["assets"]["card"]["large"] | ""
                               : player["assets"]["agent"]["small"] | "";
-  const int16_t viewportWidth = tft.width();
-  const int16_t viewportHeight = tft.height();
-  const int16_t imageHeight = playerCard
-                                  ? viewportHeight - 42 - 4
-                                  : min(viewportWidth, viewportHeight - 42 - 4);
+  const int16_t imageSize = min(tft.width(), tft.height() - 42 - 4);
   String resizedUrl = "https://wsrv.nl/?url=" + urlEncode(sourceUrl) +
-                       "&h=" + String(imageHeight);
-  if (playerCard) {
-    resizedUrl += "&w=" + String(viewportWidth) + "&fit=cover";
-  } else {
-    resizedUrl += "&w=" + String(imageHeight) + "&fit=contain";
+                      "&h=" + String(imageSize);
+  if (!playerCard) {
+    resizedUrl += "&w=" + String(imageSize) + "&fit=contain";
   }
   resizedUrl += "&bg=black&output=png";
-  drawStatus(title, playerCard ? "" : "Loading image...");
-  if (!drawPngFromUrl(resizedUrl.c_str(), 42, viewportWidth, viewportHeight)) {
+  drawStatus(title, "Loading image...");
+  if (!drawPngFromUrl(resizedUrl.c_str(), 42)) {
     drawStatus(title, "Image unavailable");
     return;
   }
@@ -507,8 +490,7 @@ void drawMatch(JsonObject match) {
   printLimited(metadata["map"].as<const char *>(), 22);
   tft.setTextColor(muted);
   tft.print("  ");
-  const char *mode = metadata["mode"] | "";
-  printLimited(mode[0] == '\0' ? "Custom Game" : mode, 20);
+  printLimited(metadata["mode"].as<const char *>(), 20);
   y += 13;
 
   const uint16_t redRounds = teams["red"]["rounds_won"] | 0;
