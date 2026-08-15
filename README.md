@@ -9,14 +9,14 @@ This project came into existence bc I was lowk obsessed with valo :D
 4. assemble everything together and tighten with screws
 5. flash the firmware
  and you're done:D !!!
-## 3D models :)
-Here's the front side of my 3D model with valo art!!
+## 3D models now builttt :)
+Here's the front side of my 3D model with valo art NOW BUILT!!
 
-<img width="732" height="593" alt="image" src="https://github.com/user-attachments/assets/fce528b5-7c88-4d24-b682-bfe56a49b938" />
+<img width="2116" height="2822" alt="IMG_8927" src="https://github.com/user-attachments/assets/e715d079-612a-4f04-8613-be51306c1f7f" />
 
-and here's the backside with valo art again:)
+and here's the backside with valo art again NOW BUILTTT:)
 
-<img width="732" height="593" alt="image" src="https://github.com/user-attachments/assets/9d5926be-dc20-48b8-aa19-4c3433f8f1c8" />
+<img width="2116" height="2822" alt="IMG_8923" src="https://github.com/user-attachments/assets/49df599a-7be7-4e3f-a4a1-e5626662904c" />
 
 ## PCB with and without components!
 
